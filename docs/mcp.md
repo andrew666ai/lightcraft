@@ -11,14 +11,15 @@ It runs in one of two modes:
 | Mode | Command | What it drives |
 |---|---|---|
 | **Headless** (default) | `lightcraft-cli mcp [--demo] [FILES/FOLDERS…]` | An in-process engine `Session`. Develop, render and export without a window. |
-| **Connect** | `lightcraft-cli mcp --connect [127.0.0.1:7980]` | A running desktop app started with `lightcraft --control 7980`, through its loopback JSON-lines control channel ([control-protocol.md](control-protocol.md)). Adds the UI tools (screenshot, clicks, keys, pointer gestures). |
+| **Connect** | `lightcraft-cli mcp --connect [127.0.0.1:7980]` | A running desktop app started with `lightcraft --control 7980`, through its loopback JSON-lines control channel ([control-protocol.md](control-protocol.md)). The bridge sends the bearer token before any tool call and refuses non-loopback addresses. Adds the UI tools (screenshot, clicks, keys, pointer gestures). |
 
 Options: `--library DIR` opens (or creates) a persistent LightCraft library — the same crash-safe
 format the desktop app uses (`~/Pictures/LightCraft Library` by default there) — so ratings, edits and albums
 survive between sessions (with `--demo`, a new library is seeded with the demo photos);
 `--demo` starts the headless session with the procedurally generated demo library;
 `--compact` lists only the helper tools (see below). In connect mode the server starts even when
-the app is not running yet and connects on the first call (and reconnects if the app restarts).
+the app is not running yet and connects on the first call (and reconnects if the app restarts),
+once the bearer token is available. Headless mode does not use the token.
 
 Logs go to stderr; stdout carries only protocol messages.
 
@@ -32,8 +33,10 @@ Build once: `cargo build --release -p lightcraft-cli` (binary: `target/release/l
 # headless, with a folder of photos imported at start
 claude mcp add lightcraft -- /path/to/lightcraft/target/release/lightcraft-cli mcp ~/Pictures/shoot
 
-# or: drive the running desktop app (start it with `lightcraft --control 7980`)
-claude mcp add lightcraft-app -- /path/to/lightcraft/target/release/lightcraft-cli mcp --connect 127.0.0.1:7980
+# or: drive the running desktop app. Start it with a private token file, and point the
+# bridge at the same file (env or --control-token-file). Stdio MCP stays the default.
+#   lightcraft --control 7980 --control-token-file ~/.config/lightcraft/control.token
+claude mcp add lightcraft-app -- /path/to/lightcraft/target/release/lightcraft-cli mcp --connect 127.0.0.1:7980 --control-token-file ~/.config/lightcraft/control.token
 ```
 
 Or check a project-scoped `.mcp.json` into your repo:
@@ -43,7 +46,7 @@ Or check a project-scoped `.mcp.json` into your repo:
   "mcpServers": {
     "lightcraft": {
       "command": "/path/to/lightcraft/target/release/lightcraft-cli",
-      "args": ["mcp", "--connect", "127.0.0.1:7980"]
+      "args": ["mcp", "--connect", "127.0.0.1:7980", "--control-token-file", "/private/path/control.token"]
     }
   }
 }
@@ -159,8 +162,9 @@ lightcraft-cli run --import ~/Pictures/a.dng develop.set control=light.exposure 
 # a persistent library: edits are saved, later invocations see them
 lightcraft-cli run --library ~/lc-lib --import ~/Pictures/shoot library.info
 lightcraft-cli run --library ~/lc-lib library.select ids=[3] develop.get
-# the running app (same commands, plus ui.* methods)
-lightcraft-cli run --connect ui.set view=detail ui.screenshot path=/tmp/ui.png
+# the running app (same commands, plus ui.* methods). Needs the control bearer.
+LIGHTCRAFT_CONTROL_TOKEN_FILE=~/.config/lightcraft/control.token \
+  lightcraft-cli run --connect ui.set view=detail ui.screenshot path=/tmp/ui.png
 # JSON lines from a file or stdin: {"command": id, "params": {…}} or {"method": "ui.inspect"}
 lightcraft-cli run --demo --script steps.jsonl --keep-going
 ```

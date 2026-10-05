@@ -9,6 +9,11 @@
   with a counterpart here come along, the rest is listed.
 - 23 new built-in presets: Portrait, Landscape, Urban, Food, Seasons, Vintage and B&W toners.
 
+### Automation
+- The loopback control channel and the MCP bridge that dials it (`mcp --connect`, `run --connect`)
+  require a bearer token before any method runs. Stdio MCP is unchanged and still the way to drive
+  a headless library. See [SECURITY.md](../SECURITY.md).
+
 ### Reliability
 - Exports are never black because of the GPU (issue #78): a GPU render that runs out of device
   memory, exceeds the GPU's buffer limits, hits a driver error or reset, or comes back

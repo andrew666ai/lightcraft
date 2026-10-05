@@ -20,7 +20,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use lightcraft_engine::Session;
-use lightcraft_mcp::{Backend, DEFAULT_ADDR, Headless, Remote, Server, expand_paths};
+use lightcraft_mcp::{Backend, DEFAULT_ADDR, Headless, Remote, Server, expand_paths, token_inputs};
 use serde_json::{Value, json};
 
 const USAGE: &str = "\
@@ -40,12 +40,18 @@ USAGE:
         --library DIR     headless, open (or create) a LightCraft library; edits are saved
         --import PATH     headless, import a file or folder first (repeatable)
         --connect [ADDR]  drive the running app (`lightcraft --control 7980`; default 127.0.0.1:7980)
+        --control-token HEX        bearer for --connect (env LIGHTCRAFT_CONTROL_TOKEN)
+        --control-token-file PATH  bearer file for --connect (env LIGHTCRAFT_CONTROL_TOKEN_FILE)
         --script FILE|-   also run JSON lines {\"command\": id, \"params\": {…}} (or {\"method\": …})
         --keep-going      continue after a failed command
   lightcraft-cli mcp [OPTIONS] [FILES/FOLDERS…]
       MCP server (JSON-RPC 2.0 over stdio). Headless by default: an in-process session with the
       given files imported. Options:
-        --connect [ADDR]  drive a running app instead (`lightcraft --control 7980`; default 127.0.0.1:7980)
+        --connect [ADDR]  drive a running app instead (`lightcraft --control 7980`; default 127.0.0.1:7980).
+                          Loopback only. Needs the same bearer as the app (flags below, or
+                          LIGHTCRAFT_CONTROL_TOKEN / LIGHTCRAFT_CONTROL_TOKEN_FILE).
+        --control-token HEX        64-hex bearer for --connect
+        --control-token-file PATH  bearer file for --connect
         --demo            headless: start with the procedurally generated demo library
         --library DIR     headless: open (or create) a persistent LightCraft library; edits are saved
         --compact         list only the helper tools (every command stays reachable via run_command)
@@ -133,11 +139,18 @@ fn main() -> ExitCode {
     }
 }
 
+fn bridge_token(supplied: Option<String>, token_file: Option<std::path::PathBuf>) -> Result<String, String> {
+    let (supplied, token_file) = token_inputs(supplied, token_file);
+    lightcraft_mcp::client_token(supplied.as_deref(), token_file.as_deref())
+}
+
 fn mcp(args: &[String]) -> Result<(), String> {
     let mut connect: Option<String> = None;
     let mut demo = false;
     let mut library: Option<String> = None;
     let mut compact = false;
+    let mut token = None;
+    let mut token_file = None;
     let mut files = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -153,6 +166,10 @@ fn mcp(args: &[String]) -> Result<(), String> {
                 }
             }
             a if a.starts_with("--connect=") => connect = Some(a["--connect=".len()..].to_string()),
+            "--control-token" => token = Some(take_value(args, &mut i, "--control-token")?.to_string()),
+            a if a.starts_with("--control-token=") => token = Some(a["--control-token=".len()..].to_string()),
+            "--control-token-file" => token_file = Some(take_value(args, &mut i, "--control-token-file")?.into()),
+            a if a.starts_with("--control-token-file=") => token_file = Some(a["--control-token-file=".len()..].into()),
             "--headless" => connect = None,
             "--demo" => demo = true,
             "--compact" => compact = true,
@@ -167,14 +184,18 @@ fn mcp(args: &[String]) -> Result<(), String> {
             if !files.is_empty() || demo || library.is_some() {
                 return Err("FILES, --demo and --library apply to headless mode only (import through the `import` tool instead)".into());
             }
-            match Remote::connect(&addr) {
+            let token = bridge_token(token, token_file)?;
+            match Remote::connect(&addr, &token) {
                 Ok(r) => {
                     eprintln!("lightcraft-cli mcp: connected to LightCraft at {addr}");
                     Box::new(r)
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.kind() == std::io::ErrorKind::InvalidInput => {
+                    return Err(format!("control authentication failed: {e}"));
+                }
                 Err(e) => {
                     eprintln!("lightcraft-cli mcp: LightCraft is not reachable at {addr} yet ({e}); will retry on each call");
-                    Box::new(Remote::lazy(&addr))
+                    Box::new(Remote::lazy(&addr, &token).map_err(|e| e.to_string())?)
                 }
             }
         }
@@ -357,6 +378,8 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut imports = Vec::new();
     let mut script: Option<String> = None;
     let mut keep_going = false;
+    let mut token = None;
+    let mut token_file = None;
     let mut i = 0;
     while i < args.len() && args[i].starts_with("--") {
         match args[i].as_str() {
@@ -372,6 +395,10 @@ fn run(args: &[String]) -> Result<(), String> {
                 None => connect = Some(DEFAULT_ADDR.to_string()),
             },
             a if a.starts_with("--connect=") => connect = Some(a["--connect=".len()..].to_string()),
+            "--control-token" => token = Some(take_value(args, &mut i, "--control-token")?.to_string()),
+            a if a.starts_with("--control-token=") => token = Some(a["--control-token=".len()..].to_string()),
+            "--control-token-file" => token_file = Some(take_value(args, &mut i, "--control-token-file")?.into()),
+            a if a.starts_with("--control-token-file=") => token_file = Some(a["--control-token-file=".len()..].into()),
             "--demo" => demo = true,
             "--library" => library = Some(take_value(args, &mut i, "--library")?.to_string()),
             "--import" => imports.push(take_value(args, &mut i, "--import")?.to_string()),
@@ -410,10 +437,10 @@ fn run(args: &[String]) -> Result<(), String> {
             if demo || library.is_some() || !imports.is_empty() {
                 return Err("--demo, --library and --import apply to headless mode only".into());
             }
-            Box::new(
-                Remote::connect(&addr)
-                    .map_err(|e| format!("LightCraft is not reachable at {addr} ({e}); start it with `lightcraft --control 7980`"))?,
-            )
+            let token = bridge_token(token, token_file)?;
+            Box::new(Remote::connect(&addr, &token).map_err(|e| {
+                format!("LightCraft is not reachable at {addr} ({e}); start it with `lightcraft --control 7980` and the same control token")
+            })?)
         }
         None => {
             let mut h = match &library {

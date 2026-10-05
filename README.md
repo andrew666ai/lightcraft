@@ -222,9 +222,10 @@ JSON parameters. The UI, the keyboard, the CLI, a JSON-lines control channel and
 through the same entry point. An agent can cull a shoot, develop it, mask a sky and export it, and *see* the result.
 
 ```sh
-lightcraft --control 7980 ~/Pictures/trip
+lightcraft --control 7980 --control-token-file ~/.config/lightcraft/control.token ~/Pictures/trip
 ```
 ```jsonc
+{"method": "auth", "params": {"token": "<64 hex characters from the token file>"}}
 {"method": "engine.execute", "params": {"command": "photo.flag",  "params": {"flag": "pick"}}}
 {"method": "engine.execute", "params": {"command": "develop.set", "params": {"values": {"light.highlights": -45, "light.shadows": 38}}}}
 {"method": "engine.execute", "params": {"command": "mask.add",    "params": {"kind": "radial", "center": [0.62, 0.4], "rx": 0.2, "ry": 0.14}}}
@@ -242,7 +243,7 @@ lightcraft --control 7980 ~/Pictures/trip
   ```sh
   cargo build --release -p lightcraft-cli
   claude mcp add lightcraft -- "$PWD/target/release/lightcraft-cli" mcp ~/Pictures/shoot          # headless
-  claude mcp add lightcraft-app -- "$PWD/target/release/lightcraft-cli" mcp --connect 127.0.0.1:7980  # live app
+  claude mcp add lightcraft-app -- "$PWD/target/release/lightcraft-cli" mcp --connect 127.0.0.1:7980 --control-token-file ~/.config/lightcraft/control.token
   ```
 - **Scriptable CLI:** `lightcraft-cli run --import in.dng develop.set control=light.exposure value=0.7 app.export
   path=out.jpg longEdge=2048` runs any chain of commands (headless, on a saved library, or against the running app)
@@ -328,7 +329,7 @@ git clone https://github.com/storytold/lightcraft && cd lightcraft
 cargo run --release -p lightcraft                       # opens your library (~/Pictures/LightCraft Library; a new one starts with demo photos)
 cargo run --release -p lightcraft -- ~/Pictures/trip    # import your photos (folders are scanned, duplicates skipped)
 cargo run --release -p lightcraft -- --memory           # a throwaway in-memory demo session (writes nothing)
-cargo run --release -p lightcraft -- --control 7980     # with the automation channel
+cargo run --release -p lightcraft -- --control 7980 --control-token-file ~/.config/lightcraft/control.token
 cargo xtask web --serve                                 # the same app in the browser: http://127.0.0.1:8080/
 cargo run --release -p lightcraft-cli -- render photo.jpg -o out.jpg --set light.exposure=0.5
 cargo xtask ci                                          # fmt, clippy, tests, layering, wasm checks

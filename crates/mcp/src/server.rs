@@ -5,6 +5,7 @@ use std::io::{BufRead, Write};
 use serde_json::{Value, json};
 
 use crate::backend::Backend;
+use crate::control_auth::{self, LineRead, MAX_REQUEST_BYTES};
 use crate::tools::{call_tool, tool_definitions};
 
 /// The MCP revision we implement.
@@ -74,17 +75,29 @@ impl Server {
     }
 
     /// Serve newline-delimited JSON-RPC until `input` closes. Logs go to stderr only (stdout is
-    /// the protocol stream).
-    pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
-        for line in input.lines() {
-            let line = line?;
-            if let Some(reply) = self.handle_line(&line) {
-                output.write_all(reply.as_bytes())?;
-                output.write_all(b"\n")?;
-                output.flush()?;
+    /// the protocol stream). Request lines longer than 1 MiB are rejected and not dispatched.
+    pub fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
+        let mut line = String::new();
+        loop {
+            match control_auth::read_bounded_line(&mut input, &mut line, MAX_REQUEST_BYTES)? {
+                LineRead::Eof => return Ok(()),
+                LineRead::TooLong => {
+                    if !line.ends_with('\n') {
+                        control_auth::discard_rest_of_line(&mut input)?;
+                    }
+                    let reply = error(Value::Null, INVALID_REQUEST, format!("request exceeds {MAX_REQUEST_BYTES} bytes"));
+                    writeln!(output, "{reply}")?;
+                    output.flush()?;
+                }
+                LineRead::Line => {
+                    if let Some(reply) = self.handle_line(&line) {
+                        output.write_all(reply.as_bytes())?;
+                        output.write_all(b"\n")?;
+                        output.flush()?;
+                    }
+                }
             }
         }
-        Ok(())
     }
 
     /// Handle one line; returns the reply line (None for notifications and blank lines).

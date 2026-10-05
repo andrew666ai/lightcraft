@@ -1,6 +1,8 @@
+use std::io::Cursor;
+
 use serde_json::{Value, json};
 
-use crate::{Headless, PROTOCOL_VERSION, Server, call_tool, command_tool_name};
+use crate::{Headless, MAX_REQUEST_BYTES, PROTOCOL_VERSION, Server, call_tool, command_tool_name};
 
 fn server() -> Server {
     Server::new(Box::new(Headless::demo()))
@@ -176,4 +178,20 @@ fn resources() {
         serde_json::from_str::<Value>(text).unwrap();
     }
     assert_eq!(rpc(&mut s, 99, "resources/read", json!({"uri": "lightcraft://nope"}))["error"]["code"], -32002);
+}
+
+#[test]
+fn serve_rejects_an_oversized_request_before_the_next_call() {
+    let mut s = server();
+    let mut input = vec![b'x'; MAX_REQUEST_BYTES + 8];
+    input.extend_from_slice(b"\n");
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#);
+    input.push(b'\n');
+    let mut out = Vec::new();
+    s.serve(Cursor::new(input), &mut out).unwrap();
+    let lines: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0]["error"]["message"].as_str().unwrap().contains("request exceeds"));
+    assert_eq!(lines[1]["id"], 2);
+    assert_eq!(lines[1]["result"], json!({}));
 }

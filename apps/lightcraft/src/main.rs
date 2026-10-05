@@ -9,9 +9,10 @@
 //! line are imported (duplicates are skipped). `--memory` runs an in-memory session that writes
 //! nothing (demo photos unless files are given; used by the README showcase scripts).
 //!
-//! `--control <port>` (or `LIGHTCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server:
-//! `{"id":1,"method":"ui.inspect","params":{}}` → `{"id":1,"ok":true,"result":…}`.
-//! See `lightcraft_ui_egui::control` for the methods.
+//! `--control <port>` (or `LIGHTCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server.
+//! The first line must authenticate with a 256-bit bearer token; only then does
+//! `{"id":1,"method":"ui.inspect","params":{}}` get `{"id":1,"ok":true,"result":…}`.
+//! See `lightcraft_ui_egui::control` for the methods and `SECURITY.md` for the token.
 //!
 //! On Windows, release builds are GUI-subsystem programs: launching the app opens no console
 //! window (issue #7). Their `--help` / `--version` output and diagnostics then have no console to
@@ -125,9 +126,7 @@ fn services() -> Services {
             c.arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
         })),
         open_url: Some(Box::new(|url: &str| {
-            if !url.starts_with("https://") {
-                return Err("only https links are opened".into());
-            }
+            require_https(url)?;
             let status = if cfg!(target_os = "macos") {
                 std::process::Command::new("open").arg(url).status()
             } else if cfg!(target_os = "windows") {
@@ -258,24 +257,35 @@ fn open_session(in_memory: bool, dir: Option<std::path::PathBuf>, seed_demo: boo
     }
 }
 
+/// UI links open only with this scheme. `http`, `file` and other URLs are refused.
+fn require_https(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") { Ok(()) } else { Err("only https links are opened".into()) }
+}
+
 const HELP: &str = "\
 lightcraft — photo library + raw developer
 
 USAGE: lightcraft [OPTIONS] [FILES/FOLDERS…]   (files and folders are imported)
 
 OPTIONS:
-  --library DIR    open (or create) this library (default: ~/Pictures/LightCraft Library; env LIGHTCRAFT_LIBRARY)
-  --no-demo        don't seed a new library with the procedural demo photos
-  --memory         throwaway in-memory session (alias --demo); nothing is saved
-  --control PORT   serve the JSON-lines control channel on 127.0.0.1:PORT (env LIGHTCRAFT_CONTROL_PORT;
-                   see docs/control-protocol.md)
+  --library DIR              open (or create) this library (default: ~/Pictures/LightCraft Library; env LIGHTCRAFT_LIBRARY)
+  --no-demo                  don't seed a new library with the procedural demo photos
+  --memory                   throwaway in-memory session (alias --demo); nothing is saved
+  --control PORT             JSON-lines control channel on 127.0.0.1:PORT (env LIGHTCRAFT_CONTROL_PORT)
+  --control-token HEX        64-hex bearer for --control (env LIGHTCRAFT_CONTROL_TOKEN)
+  --control-token-file PATH  read or create that token file (env LIGHTCRAFT_CONTROL_TOKEN_FILE; mode 0600)
   --version, --help
+
+Without a token or token file, --control prints a one-shot token to stderr. Prefer a token file.
+See SECURITY.md and docs/control-protocol.md. The app runs normally when --control is omitted.
 ";
 
 fn main() -> eframe::Result {
     lightcraft_engine::guard::install_hook(std::env::temp_dir().join("lightcraft-panics.log"));
     alloc_release::install();
     let mut control_port: Option<u16> = std::env::var("LIGHTCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok());
+    let mut control_token = None;
+    let mut control_token_file = None;
     let mut files = Vec::new();
     let mut seed_demo = true;
     let mut in_memory = false;
@@ -284,6 +294,18 @@ fn main() -> eframe::Result {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--control" => control_port = args.next().and_then(|p| p.parse().ok()),
+            "--control-token" => {
+                control_token = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("lightcraft: --control-token needs a 64-character hex value\n\n{HELP}");
+                    std::process::exit(2);
+                }));
+            }
+            "--control-token-file" => {
+                control_token_file = Some(args.next().map(std::path::PathBuf::from).unwrap_or_else(|| {
+                    eprintln!("lightcraft: --control-token-file needs a path\n\n{HELP}");
+                    std::process::exit(2);
+                }));
+            }
             "--library" => library_dir = args.next().map(std::path::PathBuf::from),
             "--no-demo" => seed_demo = false,
             "--memory" | "--demo" => in_memory = true,
@@ -302,6 +324,27 @@ fn main() -> eframe::Result {
             _ => files.push(a),
         }
     }
+    let control = control_port.map(|port| {
+        let (supplied, token_file) = lightcraft_mcp::token_inputs(control_token, control_token_file);
+        match lightcraft_mcp::server_token(supplied.as_deref(), token_file.as_deref()) {
+            Ok(token) => {
+                if let Some(path) = token_file {
+                    eprintln!("lightcraft: control token file: {}", path.display());
+                } else if supplied.is_none() {
+                    // One line, this launch only, so a local operator can hand it to the bridge.
+                    // Prefer --control-token-file so the token is not written to the terminal.
+                    eprintln!("lightcraft: control token for this launch (stderr only): {token}");
+                } else {
+                    eprintln!("lightcraft: using supplied control token");
+                }
+                (port, token)
+            }
+            Err(e) => {
+                eprintln!("lightcraft: cannot configure control authentication: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
     let prefs = load_prefs();
     // --library, else the library last opened from Settings, else the default location
     let library_dir = library_dir.or_else(|| {
@@ -336,8 +379,8 @@ fn main() -> eframe::Result {
                 app.ui = ui;
             }
             app.integrated_titlebar = cfg!(target_os = "macos");
-            if let Some(port) = control_port {
-                let rx = control_server::start(port, cc.egui_ctx.clone());
+            if let Some((port, token)) = control {
+                let rx = control_server::start(port, token, cc.egui_ctx.clone());
                 app = app.with_control(rx);
             }
             if !files.is_empty() {
@@ -355,4 +398,19 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_https;
+
+    #[test]
+    fn open_url_stays_https_only() {
+        assert!(require_https("https://example.com/docs").is_ok());
+        assert!(require_https("https://example.com").is_ok());
+        assert!(require_https("http://example.com").is_err());
+        assert!(require_https("file:///etc/passwd").is_err());
+        assert!(require_https("javascript:alert(1)").is_err());
+        assert!(require_https("HTTPS://example.com").is_err());
+    }
 }

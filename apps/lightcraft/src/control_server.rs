@@ -1,15 +1,19 @@
 //! Loopback JSON-lines control server: one request per line, one reply per line.
-//! This is the transport the MCP server (`lightcraft-cli mcp --connect`) wraps.
+//!
+//! The first line on every connection must be `{"method":"auth","params":{"token":…}}`.
+//! Nothing is dispatched before that succeeds. This is the transport `lightcraft-cli mcp --connect` wraps.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::io::Write;
+use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
+use lightcraft_mcp::{ConnectionLimiter, MAX_CONNECTIONS, configure_stream, serve_authenticated, write_reply};
 use lightcraft_ui_egui::ControlRequest;
 use serde_json::{Value, json};
 
-pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+pub fn start(port: u16, token: String, ctx: egui::Context) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -18,45 +22,49 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
             return rx;
         }
     };
+    match listener.local_addr() {
+        Ok(addr) if addr.ip().is_loopback() => {}
+        Ok(addr) => {
+            eprintln!("lightcraft: control server refused non-loopback address {addr}");
+            return rx;
+        }
+        Err(e) => {
+            eprintln!("lightcraft: control server has no local address: {e}");
+            return rx;
+        }
+    }
     eprintln!("lightcraft: control server listening on 127.0.0.1:{port}");
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+    let token = Arc::new(token);
+    if let Err(e) = std::thread::Builder::new().name("lightcraft-control-listen".into()).spawn(move || {
+        let limiter = ConnectionLimiter::new(MAX_CONNECTIONS);
+        for mut stream in listener.incoming().flatten() {
+            let Some(permit) = limiter.try_acquire() else {
+                let _ = configure_stream(&stream);
+                let _ = write_reply(&mut stream, &json!({"id": null, "ok": false, "error": "connection limit reached"}));
+                let _ = stream.flush();
+                continue;
+            };
             let tx = tx.clone();
             let ctx = ctx.clone();
-            std::thread::spawn(move || serve(stream, tx, ctx));
+            let token = Arc::clone(&token);
+            if let Err(e) = std::thread::Builder::new().name("lightcraft-control".into()).spawn(move || {
+                let _permit = permit;
+                serve_authenticated(stream, &token, |method, params| dispatch(&tx, &ctx, method, params));
+            }) {
+                eprintln!("lightcraft: control connection thread failed to start: {e}");
+            }
         }
-    });
+    }) {
+        eprintln!("lightcraft: control server failed to start: {e}");
+    }
     rx
 }
 
-fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context) {
-    let Ok(read) = stream.try_clone() else { return };
-    let mut out = stream;
-    for line in BufReader::new(read).lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => {
-                let id = msg.get("id").cloned().unwrap_or(Value::Null);
-                let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
-                let params = msg.get("params").cloned().unwrap_or(json!({}));
-                let (req, rrx) = ControlRequest::new(method, params);
-                if tx.send(req).is_err() {
-                    break;
-                }
-                ctx.request_repaint();
-                let mut r = rrx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"}));
-                if let Some(o) = r.as_object_mut() {
-                    o.insert("id".into(), id);
-                }
-                r
-            }
-            Err(e) => json!({"ok": false, "error": format!("bad JSON: {e}")}),
-        };
-        if writeln!(out, "{reply}").is_err() {
-            break;
-        }
+fn dispatch(tx: &std::sync::mpsc::Sender<ControlRequest>, ctx: &egui::Context, method: String, params: Value) -> Value {
+    let (req, rrx) = ControlRequest::new(method, params);
+    if tx.send(req).is_err() {
+        return json!({"ok": false, "error": "control channel closed"});
     }
+    ctx.request_repaint();
+    rrx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"}))
 }

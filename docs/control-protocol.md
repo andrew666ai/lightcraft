@@ -1,13 +1,24 @@
 # Control protocol
 
 `lightcraft --control 7980` (or `LIGHTCRAFT_CONTROL_PORT=7980`) starts a JSON-lines server on
-`127.0.0.1:7980` (loopback only). One request per line, one reply per line, in order:
+`127.0.0.1:7980` (loopback only). One request per line, one reply per line, in order.
+
+The first line on every connection must authenticate. A 64-hex token comes from
+`--control-token-file` / `LIGHTCRAFT_CONTROL_TOKEN_FILE` (created mode `0600` on Unix if missing),
+`--control-token` / `LIGHTCRAFT_CONTROL_TOKEN`, or — if you pass neither — one line on stderr for
+that launch. Prefer a token file. See [SECURITY.md](../SECURITY.md).
 
 ```text
+→ {"id": "auth", "method": "auth", "params": {"token": "<64 hex characters>"}}
+← {"id": "auth", "ok": true, "result": {"authenticated": true}}
 → {"id": 1, "method": "engine.execute", "params": {"command": "photo.rate", "params": {"rating": 4}}}
 ← {"id": 1, "ok": true, "result": null}
 ← {"id": 2, "ok": false, "error": "unknown command `nope`"}
 ```
+
+Anything else as the first line, including a wrong token, returns `authentication required` and
+closes the connection. The listener accepts at most 16 connections, request lines up to 1 MiB and
+replies up to 8 MiB.
 
 Requests are answered on the UI thread between frames (timeout 60 s). The MCP server's connect
 mode ([mcp.md](mcp.md)) is a thin layer over this channel. Implementation:

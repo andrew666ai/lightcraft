@@ -2079,6 +2079,7 @@ dependencies = [
  "egui",
  "lightcraft-codecs",
  "lightcraft-engine",
+ "lightcraft-mcp",
  "lightcraft-raster",
  "lightcraft-sysmem",
  "lightcraft-ui-egui",
@@ -2219,6 +2220,7 @@ dependencies = [
 name = "lightcraft-mcp"
 version = "0.2.0"
 dependencies = [
+ "getrandom 0.3.4",
  "lightcraft-codecs",
  "lightcraft-engine",
  "lightcraft-raster",

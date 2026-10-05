@@ -5,8 +5,9 @@
 //! resources and forwards everything to a [`Backend`]:
 //!
 //! - [`Remote`] talks to a running desktop app through its loopback JSON-lines control channel
-//!   (`lightcraft --control 7980`): one `{"id","method","params"}` line in, one
-//!   `{"id","ok","result"|"error"}` line out (see `docs/control-protocol.md`).
+//!   (`lightcraft --control 7980`). The first line is a bearer-token `auth` request; only then
+//!   does each `{"id","method","params"}` line get an `{"id","ok","result"|"error"}` reply
+//!   (see `docs/control-protocol.md`).
 //! - [`Headless`] hosts an in-process [`lightcraft_engine::Session`] and answers the same
 //!   control-channel method names itself (rendering with the engine's pipeline and encoding with
 //!   `lightcraft-codecs`), so agents can develop photos and look at the result without a window.
@@ -17,12 +18,17 @@
 
 mod backend;
 mod base64;
+mod control_auth;
 mod headless;
 mod server;
 mod tools;
 
 pub use backend::{Backend, Remote};
 pub use base64::{base64_decode, base64_encode};
+pub use control_auth::{
+    AUTH_METHOD, ConnectionLimiter, MAX_CONNECTIONS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, client_token, configure_stream, ensure_loopback,
+    generate_token, serve_authenticated, server_token, token_inputs, write_reply,
+};
 pub use headless::{Headless, PHOTO_EXTENSIONS, encode_image, expand_paths, write_image};
 pub use server::{PROTOCOL_VERSION, Server};
 pub use tools::{COMMAND_TOOL_PREFIX, ToolResult, call_tool, command_tool_name, helper_tools, tool_definitions};
